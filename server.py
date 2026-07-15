@@ -48,6 +48,12 @@ NUM_HANDS       = 2
 FEAT_PER_HAND   = 21 * 3       # 63
 SEQUENCE_LENGTH = 30           # 30 frames for LSTM sequence
 
+ALLOWED_WORDS = {
+    'hello', 'help', 'yes', 'no', 'thanks', 'please', 'water', 'eat', 'stop', 'iloveyou',
+    'good', 'bad', 'more', 'sorry', 'friend', 'sad', 'drink', 'year', 'day', 'phone',
+    'home', 'happy', 'hungry', 'where', 'time'
+}
+
 # Global sequence buffer and state for single-hand word recognition
 primary_sequence_buffer = []
 alpha_prediction_buffer = []
@@ -590,6 +596,22 @@ def get_index_straightness_from_raw(lm_raw):
         return 1.0
 
 
+def get_finger_straightness_from_raw(lm_raw, base_idx, tip_idx):
+    """Calculate straightness of a single finger using its base and tip index."""
+    try:
+        c_base = np.array(lm_raw[base_idx], dtype=np.float32)
+        c_tip = np.array(lm_raw[tip_idx], dtype=np.float32)
+        c1 = np.array(lm_raw[base_idx + 1], dtype=np.float32)
+        c2 = np.array(lm_raw[base_idx + 2], dtype=np.float32)
+        d_base_tip = np.linalg.norm(c_base - c_tip)
+        d_joints = (np.linalg.norm(c_base - c1) + 
+                    np.linalg.norm(c1 - c2) + 
+                    np.linalg.norm(c2 - c_tip))
+        return float(d_base_tip / d_joints) if d_joints > 0 else 1.0
+    except Exception:
+        return 0.0
+
+
 def process_landmarks_prediction(data):
     """
     Core prediction logic that takes the JSON data dict and returns a tuple/dict of results.
@@ -608,7 +630,7 @@ def process_landmarks_prediction(data):
 
     # Mirror left hand (which is detected as "Left") to canonical right-hand
     handedness = data.get("handedness", "Right")
-    if handedness.lower() == "left":
+    if handedness.lower() == "right":
         # Copy lm_raw to avoid modifying in-place (since it might be reused)
         lm_raw = [[1.0 - lm[0], lm[1], lm[2]] for lm in lm_raw]
         
@@ -677,96 +699,30 @@ def process_landmarks_prediction(data):
 
         if hasattr(alpha_model, "predict_proba"):
             proba = alpha_model.predict_proba(X_alpha)[0].copy()
+            # Overrides commented out for Alphabet Recovery Phase to restore raw model accuracy.
+            # B vs F, R crossed, and N vs M vs A fist knuckling checks disabled.
+            
+            # B finger straightness override (strict, regression-free, includes R confusion fix)
             try:
                 idx_B = alpha_labels.index('B')
                 idx_F = alpha_labels.index('F')
-                if straightness > 0.90:
-                    proba[idx_B] += proba[idx_F]; proba[idx_F] = 0.0
-                elif straightness < 0.80:
-                    proba[idx_B] = 0.0
-                s = proba.sum()
-                if s > 0:
-                    proba = proba / s
-            except (ValueError, IndexError):
-                pass
-
-            # R override
-            try:
-                dx_mcp = lm_raw[9][0] - lm_raw[5][0]
-                dy_mcp = lm_raw[9][1] - lm_raw[5][1]
-                dx_tip = lm_raw[12][0] - lm_raw[8][0]
-                dy_tip = lm_raw[12][1] - lm_raw[8][1]
-                proj = dx_mcp * dx_tip + dy_mcp * dy_tip
-                is_crossed = (proj < 0)
-                if is_crossed:
-                    idx_R = alpha_labels.index('R')
-                    for char in ['U', 'V']:
-                        try:
-                            idx_char = alpha_labels.index(char)
-                            proba[idx_R] += proba[idx_char]
-                            proba[idx_char] = 0.0
-                        except ValueError:
-                            pass
-                    s = proba.sum()
-                    if s > 0:
-                        proba = proba / s
-            except (ValueError, IndexError):
-                pass
-
-            # N vs M vs A override
-            try:
-                predicted_fist_classes = {'N', 'M', 'A', 'S'}
-                best_fist_class = None
-                best_fist_prob = -1.0
-                for c in predicted_fist_classes:
-                    try:
-                        idx_c = alpha_labels.index(c)
-                        if proba[idx_c] > best_fist_prob:
-                            best_fist_prob = proba[idx_c]
-                            best_fist_class = c
-                    except ValueError:
-                        pass
+                idx_M = alpha_labels.index('M')
+                idx_N = alpha_labels.index('N')
+                idx_C = alpha_labels.index('C')
+                idx_R = alpha_labels.index('R')
                 
-                if best_fist_class is not None and best_fist_prob > 0.15:
-                    x4 = lm_raw[4][0]
-                    x5 = lm_raw[5][0]
-                    x9 = lm_raw[9][0]
-                    x_min = min(x5, x9)
-                    x_max = max(x5, x9)
-                    
-                    if x_min <= x4 <= x_max:
-                        idx_N = alpha_labels.index('N')
-                        for c in predicted_fist_classes:
-                            if c != 'N':
-                                try:
-                                    idx_c = alpha_labels.index(c)
-                                    proba[idx_N] += proba[idx_c]
-                                    proba[idx_c] = 0.0
-                                except ValueError:
-                                    pass
-                    elif (x4 > x_max if x9 > x5 else x4 < x_min):
-                        idx_M = alpha_labels.index('M')
-                        for c in predicted_fist_classes:
-                            if c != 'M':
-                                try:
-                                    idx_c = alpha_labels.index(c)
-                                    proba[idx_M] += proba[idx_c]
-                                    proba[idx_c] = 0.0
-                                except ValueError:
-                                    pass
-                    elif (x4 < x_min if x9 > x5 else x4 > x_max):
-                        idx_A = alpha_labels.index('A')
-                        for c in predicted_fist_classes:
-                            if c != 'A':
-                                try:
-                                    idx_c = alpha_labels.index(c)
-                                    proba[idx_A] += proba[idx_c]
-                                    proba[idx_c] = 0.0
-                                except ValueError:
-                                    pass
-                    s = proba.sum()
-                    if s > 0:
-                        proba = proba / s
+                s_idx = get_finger_straightness_from_raw(lm_raw, 5, 8)
+                s_mid = get_finger_straightness_from_raw(lm_raw, 9, 12)
+                s_rng = get_finger_straightness_from_raw(lm_raw, 13, 16)
+                s_pky = get_finger_straightness_from_raw(lm_raw, 17, 20)
+                
+                if s_idx > 0.90 and s_mid > 0.90 and s_rng > 0.90 and s_pky > 0.90 and proba[idx_B] > 0.20:
+                    proba[idx_B] += proba[idx_F] + proba[idx_M] + proba[idx_N] + proba[idx_C] + proba[idx_R]
+                    proba[idx_F] = 0.0
+                    proba[idx_M] = 0.0
+                    proba[idx_N] = 0.0
+                    proba[idx_C] = 0.0
+                    proba[idx_R] = 0.0
             except (ValueError, IndexError):
                 pass
 
@@ -841,11 +797,13 @@ def process_landmarks_prediction(data):
             
             # Print debug for target word logging
             TARGET_DEBUG_WORDS = {'hello', 'help', 'water', 'good', 'mother', 'family', 'school', 'go', 'come', 'what', 'where', 'need'}
-            is_word_confident = (word_sign is not None and word_conf >= min_conf_word)
+            is_word_confident = (word_sign is not None and word_conf >= min_conf_word and word_sign in ALLOWED_WORDS)
             ret_word_sign = word_sign if is_word_confident else None
             ret_word_conf = word_conf if is_word_confident else 0.0
             
-            if not is_word_confident:
+            if word_sign is not None and word_sign not in ALLOWED_WORDS:
+                rejection_reason = f"Word '{word_sign}' is disabled/unstable"
+            elif not is_word_confident:
                 rejection_reason = f"Confidence {word_conf:.1f}% below threshold {min_conf_word:.1f}%"
             
             if word_sign in TARGET_DEBUG_WORDS:
@@ -969,7 +927,7 @@ def predict_word_endpoint():
             aligned_seq = []
             for frame in seq:
                 f_copy = list(frame)
-                if handedness.lower() == "left":
+                if handedness.lower() == "right":
                     # Flip x coordinates to map left hand to right hand space
                     for idx in range(0, 63, 3):
                         f_copy[idx] = 1.0 - f_copy[idx]
@@ -989,6 +947,16 @@ def predict_word_endpoint():
             word_label = reverse_label_map.get(best_idx, str(best_idx))
             word_conf = float(pred_lstm[best_idx]) * 100.0
             
+            if word_label not in ALLOWED_WORDS:
+                print(f"[predict_word] BLOCKED disabled/unstable word prediction: '{word_label}'")
+                return jsonify({
+                    "prediction": None,
+                    "confidence": 0.0,
+                    "sequence_len": len(seq),
+                    "required_len": SEQUENCE_LENGTH,
+                    "status": "disabled"
+                })
+                
             print(f"[predict_word] SUCCESS: Predicted word: '{word_label}' | Confidence: {word_conf:.2f}% | Sequence length: {len(seq)}/{SEQUENCE_LENGTH}")
             return jsonify({
                 "prediction": word_label,
@@ -1094,6 +1062,19 @@ def predict_word_endpoint():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e), "prediction": None, "confidence": 0.0}), 500
+
+
+STARTUP_TIME = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+@app.route("/version", methods=["GET"])
+def version():
+    mtime = os.path.getmtime(__file__)
+    modified_time = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+    return jsonify({
+        "startup_timestamp": STARTUP_TIME,
+        "pid": os.getpid(),
+        "server_modified_timestamp": modified_time
+    })
 
 
 @app.route("/reset_sequence", methods=["POST"])

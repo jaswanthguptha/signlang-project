@@ -257,7 +257,7 @@ const HomePage = ({ setPage, analytics, language }) => (
     <div className="home-stats">
       {[
         {val:"26",  lbl:t("Alphabet Signs", language),   icon:"🔤", c:"cyan"  },
-        {val:"21",  lbl:t("WLASL Word Signs", language),  icon:"💬", c:"purple"},
+        {val:"25",  lbl:t("WLASL Word Signs", language),  icon:"💬", c:"purple"},
         {val:"20+", lbl:t("Target FPS", language),        icon:"⚡", c:"green" },
         {val:"9",   lbl:t("Languages", language),         icon:"🌐", c:"blue"  },
       ].map((s,i) => (
@@ -420,7 +420,7 @@ const AboutPage = ({ language }) => (
           <li>📘 ASL Alphabet (Kaggle) — 87,000 images</li>
           <li>📗 WLASL Dataset — 11,980 word sign videos</li>
           <li>🔬 Data augmentation — 5× multiplication</li>
-          <li>✅ {t("21 WLASL word classes trained", language)}</li>
+          <li>✅ {t("25 WLASL word classes trained", language)}</li>
         </ul>
       </div>
     </div>
