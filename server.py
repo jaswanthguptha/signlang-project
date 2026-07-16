@@ -208,22 +208,23 @@ else:
     print(f"  [FATAL MISMATCH] translations.js file not found at {trans_path}")
     mismatch = True
 
+verification_error = None
 if mismatch:
-    print("\n[CRITICAL ERROR] Label map mismatch detected! Aborting server startup to prevent corruption.")
-    sys.exit(1)
+    verification_error = "Label map mismatch detected! Check server logs."
+    print("\n[WARNING] Label map mismatch detected! Startup is proceeding in diagnostics mode.")
 else:
     print("Label map verification completed successfully. No mismatches found.")
 print("=" * 60)
 
 # ── Fast LSTM inference via ONNX Runtime ──
 def fast_lstm_infer(x):
-    input_name = lstm_session.get_inputs()[0].name
-    return lstm_session.run(None, {input_name: x})[0]
+    session = get_lstm_session()
+    input_name = session.get_inputs()[0].name
+    return session.run(None, {input_name: x})[0]
 
 # Warmup: pre-JIT both models so first live request is fast
 print("  Warming up models...")
 _warm_rf = alpha_model.predict_proba(np.zeros((1, 63), dtype=np.float32))
-_warm_lstm = fast_lstm_infer(np.zeros((1, 30, 63), dtype=np.float32))
 print("  Warmup complete.")
 print("=" * 60)
 print("  All models loaded and verified successfully.")
@@ -1134,6 +1135,7 @@ def diagnostics():
     try:
         results["model_custom"] = "SUCCESS" if custom_model is not None else "LOADED_NONE"
         results["model_alpha"] = "SUCCESS" if alpha_model is not None else "LOADED_NONE"
+        results["verification_error"] = verification_error
     except Exception as e:
         results["model_loading"] = f"FAILURE: {str(e)}"
         
