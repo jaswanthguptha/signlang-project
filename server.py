@@ -69,16 +69,22 @@ print("=" * 60)
 print("  Loading models ...")
 print("=" * 60)
 
-hand_landmarker = vision.HandLandmarker.create_from_options(
-    vision.HandLandmarkerOptions(
-        base_options=python.BaseOptions(model_asset_path=HAND_LANDMARKER_PATH),
-        num_hands=NUM_HANDS,
-        min_hand_detection_confidence=0.35,  # Lowered to support wide angles/low-light
-        min_hand_presence_confidence=0.35,   # Lowered to avoid dropouts
-        min_tracking_confidence=0.35,        # Lowered to prevent fast-movement tracking loss
-    )
-)
-print(f"  hand_landmarker  -> {HAND_LANDMARKER_PATH}")
+hand_landmarker = None
+
+def get_hand_landmarker():
+    global hand_landmarker
+    if hand_landmarker is None:
+        print("Lazy loading hand_landmarker...")
+        hand_landmarker = vision.HandLandmarker.create_from_options(
+            vision.HandLandmarkerOptions(
+                base_options=python.BaseOptions(model_asset_path=HAND_LANDMARKER_PATH),
+                num_hands=NUM_HANDS,
+                min_hand_detection_confidence=0.35,  # Lowered to support wide angles/low-light
+                min_hand_presence_confidence=0.35,   # Lowered to avoid dropouts
+                min_tracking_confidence=0.35,        # Lowered to prevent fast-movement tracking loss
+            )
+        )
+    return hand_landmarker
 
 with open(CUSTOM_MODEL_PATH, "rb") as f:
     custom_model = pickle.load(f)
@@ -90,13 +96,24 @@ with open(ALPHA_MODEL_PATH, "rb") as f:
 with open(ALPHA_LABELS_PATH, "rb") as f:
     alpha_labels = pickle.load(f)
 
-# Configure session options for lowest memory footprint
-opts = ort.SessionOptions()
-opts.intra_op_num_threads = 1
-opts.inter_op_num_threads = 1
-opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-LSTM_ONNX_PATH = os.path.join(MODELS_DIR, "lstm_words.onnx")
-lstm_session = ort.InferenceSession(LSTM_ONNX_PATH, sess_options=opts, providers=['CPUExecutionProvider'])
+lstm_session = None
+
+def get_lstm_session():
+    global lstm_session
+    if lstm_session is None:
+        print("Lazy loading lstm_session...")
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 1
+        opts.inter_op_num_threads = 1
+        opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        lstm_session = ort.InferenceSession(LSTM_ONNX_PATH, sess_options=opts, providers=['CPUExecutionProvider'])
+        # Warmup inside get_lstm_session
+        print("  Warming up lstm_session...")
+        input_name = lstm_session.get_inputs()[0].name
+        lstm_session.run(None, {input_name: np.zeros((1, 30, 63), dtype=np.float32)})
+        print("  lstm_session warmup complete.")
+    return lstm_session
+
 with open(REVERSE_MAP_PATH, "rb") as f:
     reverse_label_map = pickle.load(f)
 
@@ -232,7 +249,7 @@ def detect(bgr_frame):
     try:
         rgb    = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        return hand_landmarker.detect(mp_img)
+        return get_hand_landmarker().detect(mp_img)
     except Exception:
         return None
 
