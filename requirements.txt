@@ -1,6 +1,6 @@
 # Runtime dependencies for the Flask recognition API and Streamlit demo.
 # Python 3.13 on 64-bit Windows is supported by the pinned ML packages.
-tensorflow-cpu==2.16.1
+onnxruntime
 mediapipe==0.10.35
 opencv-python-headless
 numpy

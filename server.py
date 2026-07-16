@@ -12,10 +12,9 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-import tensorflow as tf
+import onnxruntime as ort
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from tensorflow import keras
 
 def get_file_timestamp_str(filepath):
     if not os.path.exists(filepath):
@@ -91,7 +90,13 @@ with open(ALPHA_MODEL_PATH, "rb") as f:
 with open(ALPHA_LABELS_PATH, "rb") as f:
     alpha_labels = pickle.load(f)
 
-lstm_model = keras.models.load_model(LSTM_MODEL_PATH)
+# Configure session options for lowest memory footprint
+opts = ort.SessionOptions()
+opts.intra_op_num_threads = 1
+opts.inter_op_num_threads = 1
+opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+LSTM_ONNX_PATH = os.path.join(MODELS_DIR, "lstm_words.onnx")
+lstm_session = ort.InferenceSession(LSTM_ONNX_PATH, sess_options=opts, providers=['CPUExecutionProvider'])
 with open(REVERSE_MAP_PATH, "rb") as f:
     reverse_label_map = pickle.load(f)
 
@@ -193,15 +198,15 @@ else:
     print("Label map verification completed successfully. No mismatches found.")
 print("=" * 60)
 
-# ── Fast LSTM inference via tf.function (removes Python overhead per call) ──
-@tf.function(input_signature=[tf.TensorSpec(shape=[1, 30, 63], dtype=tf.float32)])
+# ── Fast LSTM inference via ONNX Runtime ──
 def fast_lstm_infer(x):
-    return lstm_model(x, training=False)
+    input_name = lstm_session.get_inputs()[0].name
+    return lstm_session.run(None, {input_name: x})[0]
 
 # Warmup: pre-JIT both models so first live request is fast
 print("  Warming up models...")
 _warm_rf = alpha_model.predict_proba(np.zeros((1, 63), dtype=np.float32))
-_warm_lstm = fast_lstm_infer(tf.zeros([1, 30, 63], dtype=tf.float32))
+_warm_lstm = fast_lstm_infer(np.zeros((1, 30, 63), dtype=np.float32))
 print("  Warmup complete.")
 print("=" * 60)
 print("  All models loaded and verified successfully.")
@@ -367,7 +372,7 @@ def predict_alpha():
                 if len(primary_sequence_buffer) == SEQUENCE_LENGTH:
                     seq_arr = np.array(primary_sequence_buffer, dtype=np.float32)
                     X_lstm = seq_arr.reshape(1, SEQUENCE_LENGTH, FEAT_PER_HAND)
-                    pred_lstm = fast_lstm_infer(tf.constant(X_lstm))[0].numpy()
+                    pred_lstm = fast_lstm_infer(X_lstm)[0]
                     best_idx_lstm = int(np.argmax(pred_lstm))
                     word_conf = float(pred_lstm[best_idx_lstm]) * 100.0
                     word_sign = reverse_label_map.get(best_idx_lstm, str(best_idx_lstm))
@@ -525,7 +530,7 @@ def predict_alpha():
             seq_arr = np.array(primary_sequence_buffer, dtype=np.float32)  # shape (30, 63)
             X_lstm = seq_arr.reshape(1, SEQUENCE_LENGTH, FEAT_PER_HAND)
             
-            pred_lstm = fast_lstm_infer(tf.constant(X_lstm))[0].numpy()
+            pred_lstm = fast_lstm_infer(X_lstm)[0]
             best_idx_lstm = int(np.argmax(pred_lstm))
             word_conf = float(pred_lstm[best_idx_lstm]) * 100.0
             word_sign = reverse_label_map.get(best_idx_lstm, str(best_idx_lstm))
@@ -787,7 +792,7 @@ def process_landmarks_prediction(data):
                 primary_sequence_buffer_local.insert(0, primary_sequence_buffer_local[0])
             seq_arr = np.array(primary_sequence_buffer_local, dtype=np.float32)
             X_lstm = seq_arr.reshape(1, SEQUENCE_LENGTH, FEAT_PER_HAND)
-            pred = fast_lstm_infer(tf.constant(X_lstm))[0].numpy()
+            pred = fast_lstm_infer(X_lstm)[0]
             best_idx = int(np.argmax(pred))
             word_conf = float(pred[best_idx]) * 100.0
             word_sign = reverse_label_map.get(best_idx, str(best_idx))
@@ -942,7 +947,7 @@ def predict_word_endpoint():
             print(f"[predict_word] Direct sequence input resampled from {len(seq)} to {seq_arr.shape}")
             
             X_lstm = seq_arr.reshape(1, SEQUENCE_LENGTH, FEAT_PER_HAND)
-            pred_lstm = fast_lstm_infer(tf.constant(X_lstm))[0].numpy()
+            pred_lstm = fast_lstm_infer(X_lstm)[0]
             best_idx = int(np.argmax(pred_lstm))
             word_label = reverse_label_map.get(best_idx, str(best_idx))
             word_conf = float(pred_lstm[best_idx]) * 100.0
@@ -1036,7 +1041,7 @@ def predict_word_endpoint():
         if seq_len == SEQUENCE_LENGTH:
             seq_arr = np.array(primary_sequence_buffer, dtype=np.float32)
             X_lstm = seq_arr.reshape(1, SEQUENCE_LENGTH, FEAT_PER_HAND)
-            pred_lstm = fast_lstm_infer(tf.constant(X_lstm))[0].numpy()
+            pred_lstm = fast_lstm_infer(X_lstm)[0]
             best_idx = int(np.argmax(pred_lstm))
             word_conf = float(pred_lstm[best_idx]) * 100.0
             word_label = reverse_label_map.get(best_idx, str(best_idx))
