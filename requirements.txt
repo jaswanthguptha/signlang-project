@@ -9,3 +9,5 @@ Flask
 Flask-Cors
 streamlit
 gTTS
+gunicorn
+
