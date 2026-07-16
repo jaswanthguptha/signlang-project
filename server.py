@@ -86,16 +86,148 @@ def get_hand_landmarker():
         )
     return hand_landmarker
 
-with open(CUSTOM_MODEL_PATH, "rb") as f:
-    custom_model = pickle.load(f)
-with open(CUSTOM_LABELS_PATH, "rb") as f:
-    custom_labels = pickle.load(f)
+custom_model = None
+custom_labels = None
+alpha_model = None
+alpha_labels = None
+reverse_label_map = None
+saved_label_map = None
+verification_error = None
+startup_error = None
 
-with open(ALPHA_MODEL_PATH, "rb") as f:
-    alpha_model = pickle.load(f)
-with open(ALPHA_LABELS_PATH, "rb") as f:
-    alpha_labels = pickle.load(f)
+# WLASL training vocabulary definition
+WLASL_CLASSES = [
+    'hello', 'help', 'yes', 'no', 'thanks', 'please', 'water', 'eat', 'stop', 'iloveyou', 'good', 'bad', 'more', 'sorry',
+    'friend', 'study', 'angry', 'year', 'home', 'happy', 'sad', 'day', 'morning', 'month', 'phone', 'hungry', 'night',
+    'drink', 'where', 'who', 'need', 'computer', 'doctor', 'time', 'like'
+]
 
+try:
+    print("=" * 60)
+    print("  Loading models...")
+    print("=" * 60)
+
+    with open(CUSTOM_MODEL_PATH, "rb") as f:
+        custom_model = pickle.load(f)
+    with open(CUSTOM_LABELS_PATH, "rb") as f:
+        custom_labels = pickle.load(f)
+
+    with open(ALPHA_MODEL_PATH, "rb") as f:
+        alpha_model = pickle.load(f)
+    with open(ALPHA_LABELS_PATH, "rb") as f:
+        alpha_labels = pickle.load(f)
+
+    with open(REVERSE_MAP_PATH, "rb") as f:
+        reverse_label_map = pickle.load(f)
+
+    # Load saved label_map.pkl
+    LABEL_MAP_PATH = os.path.join(MODELS_DIR, "label_map.pkl")
+    with open(LABEL_MAP_PATH, "rb") as f:
+        saved_label_map = pickle.load(f)
+
+    model_time = get_file_timestamp_str(LSTM_MODEL_PATH)
+    label_time = get_file_timestamp_str(REVERSE_MAP_PATH)
+    num_classes = len(reverse_label_map)
+
+    # Print Phase 1 startup information (EXACT requested format)
+    print("Loaded Model:\nmodels/lstm_words.keras")
+    print(f"\nModified:\n{model_time}")
+    print(f"\nLabel Map Modified:\n{label_time}")
+    print(f"\nClasses:\n{num_classes}")
+    print("=" * 60)
+
+    # Print first and last 10 labels
+    sorted_indices = sorted(list(reverse_label_map.keys()))
+    first_10 = [f"{i}: {reverse_label_map[i]}" for i in sorted_indices[:10]]
+    last_10 = [f"{i}: {reverse_label_map[i]}" for i in sorted_indices[-10:]]
+
+    print("First 10 labels:")
+    for item in first_10:
+        print(f"  {item}")
+    print("\nLast 10 labels:")
+    for item in last_10:
+        print(f"  {item}")
+    print("=" * 60)
+
+    # Phase 2: Assertions and Abort startup if mismatch
+    mismatch = False
+    print("Verifying server label map against WLASL training definition...")
+    for idx, name in enumerate(WLASL_CLASSES):
+        if idx not in reverse_label_map:
+            print(f"[FATAL MISMATCH] Index {idx} is missing from reverse_label_map.pkl!")
+            mismatch = True
+        elif reverse_label_map[idx] != name:
+            print(f"[FATAL MISMATCH] Index {idx}: Expected '{name}' but got '{reverse_label_map[idx]}'!")
+            mismatch = True
+
+    if len(reverse_label_map) != len(WLASL_CLASSES):
+        print(f"[FATAL MISMATCH] Class count mismatch: WLASL training has {len(WLASL_CLASSES)} but server reverse_label_map has {len(reverse_label_map)}")
+        mismatch = True
+
+    if len(saved_label_map) != len(WLASL_CLASSES):
+        print(f"[FATAL MISMATCH] Class count mismatch: WLASL training has {len(WLASL_CLASSES)} but saved_label_map has {len(saved_label_map)}")
+        mismatch = True
+
+    for idx, name in enumerate(WLASL_CLASSES):
+        if name not in saved_label_map:
+            print(f"[FATAL MISMATCH] Word '{name}' is missing from saved_label_map.pkl!")
+            mismatch = True
+        elif saved_label_map[name] != idx:
+            print(f"[FATAL MISMATCH] Word '{name}': Expected index {idx} but got {saved_label_map[name]} in saved_label_map.pkl!")
+            mismatch = True
+
+    # Verify frontend translations
+    print("Verifying frontend translations.js file...")
+    trans_path = os.path.join(BASE_DIR, "frontend", "src", "translations.js")
+    if os.path.exists(trans_path):
+        with open(trans_path, "r", encoding="utf-8") as f_trans:
+            trans_content = f_trans.read()
+        
+        # Extract keys from English translations block
+        match_en = re.search(r"en:\s*\{([^}]+)\}", trans_content)
+        if match_en:
+            en_block = match_en.group(1)
+            keys_found = re.findall(r"([a-zA-Z0-9_-]+)\s*:", en_block)
+            keys_found += re.findall(r"['\"]([a-zA-Z0-9_-]+)['\"]\s*:", en_block)
+            keys_set = set(keys_found)
+            
+            missing_keys = [w for w in WLASL_CLASSES if w not in keys_set]
+            if missing_keys:
+                print(f"[FATAL MISMATCH] Frontend translations missing keys for WLASL signs: {missing_keys}")
+                mismatch = True
+            else:
+                print("  Frontend translation keys verification PASSED.")
+        else:
+            print("  [FATAL MISMATCH] Could not parse 'en' translations block from translations.js")
+            mismatch = True
+    else:
+        print(f"  [FATAL MISMATCH] translations.js file not found at {trans_path}")
+        mismatch = True
+
+    if mismatch:
+        verification_error = "Label map mismatch detected! Check server logs."
+        print("\n[WARNING] Label map mismatch detected! Startup is proceeding in diagnostics mode.")
+    else:
+        print("Label map verification completed successfully. No mismatches found.")
+    print("=" * 60)
+
+    # Warmup: pre-JIT both models so first live request is fast
+    print("  Warming up models...")
+    _warm_rf = alpha_model.predict_proba(np.zeros((1, 63), dtype=np.float32))
+    print("  Warmup complete.")
+    print("=" * 60)
+    print("  All models loaded and verified successfully.")
+    print("=" * 60)
+
+except Exception as e:
+    startup_error = traceback.format_exc()
+    print("=" * 60)
+    print("  [CRITICAL ERROR DURING STARTUP] Server is continuing in DIAGNOSTICS mode.")
+    print(startup_error)
+    print("=" * 60)
+
+# Configure ONNX session options
+LSTM_ONNX_PATH = os.path.join(MODELS_DIR, "lstm_words.onnx")
 lstm_session = None
 
 def get_lstm_session():
@@ -114,121 +246,11 @@ def get_lstm_session():
         print("  lstm_session warmup complete.")
     return lstm_session
 
-with open(REVERSE_MAP_PATH, "rb") as f:
-    reverse_label_map = pickle.load(f)
-
-# Load saved label_map.pkl
-LABEL_MAP_PATH = os.path.join(MODELS_DIR, "label_map.pkl")
-with open(LABEL_MAP_PATH, "rb") as f:
-    saved_label_map = pickle.load(f)
-
-# WLASL training vocabulary definition
-WLASL_CLASSES = [
-    'hello', 'help', 'yes', 'no', 'thanks', 'please', 'water', 'eat', 'stop', 'iloveyou', 'good', 'bad', 'more', 'sorry',
-    'friend', 'study', 'angry', 'year', 'home', 'happy', 'sad', 'day', 'morning', 'month', 'phone', 'hungry', 'night',
-    'drink', 'where', 'who', 'need', 'computer', 'doctor', 'time', 'like'
-]
-
-model_time = get_file_timestamp_str(LSTM_MODEL_PATH)
-label_time = get_file_timestamp_str(REVERSE_MAP_PATH)
-num_classes = len(reverse_label_map)
-
-# Print Phase 1 startup information (EXACT requested format)
-print("Loaded Model:\nmodels/lstm_words.keras")
-print(f"\nModified:\n{model_time}")
-print(f"\nLabel Map Modified:\n{label_time}")
-print(f"\nClasses:\n{num_classes}")
-print("=" * 60)
-
-# Print first and last 10 labels
-sorted_indices = sorted(list(reverse_label_map.keys()))
-first_10 = [f"{i}: {reverse_label_map[i]}" for i in sorted_indices[:10]]
-last_10 = [f"{i}: {reverse_label_map[i]}" for i in sorted_indices[-10:]]
-
-print("First 10 labels:")
-for item in first_10:
-    print(f"  {item}")
-print("\nLast 10 labels:")
-for item in last_10:
-    print(f"  {item}")
-print("=" * 60)
-
-# Phase 2: Assertions and Abort startup if mismatch
-mismatch = False
-print("Verifying server label map against WLASL training definition...")
-for idx, name in enumerate(WLASL_CLASSES):
-    if idx not in reverse_label_map:
-        print(f"[FATAL MISMATCH] Index {idx} is missing from reverse_label_map.pkl!")
-        mismatch = True
-    elif reverse_label_map[idx] != name:
-        print(f"[FATAL MISMATCH] Index {idx}: Expected '{name}' but got '{reverse_label_map[idx]}'!")
-        mismatch = True
-
-if len(reverse_label_map) != len(WLASL_CLASSES):
-    print(f"[FATAL MISMATCH] Class count mismatch: WLASL training has {len(WLASL_CLASSES)} but server reverse_label_map has {len(reverse_label_map)}")
-    mismatch = True
-
-if len(saved_label_map) != len(WLASL_CLASSES):
-    print(f"[FATAL MISMATCH] Class count mismatch: WLASL training has {len(WLASL_CLASSES)} but saved_label_map has {len(saved_label_map)}")
-    mismatch = True
-
-for idx, name in enumerate(WLASL_CLASSES):
-    if name not in saved_label_map:
-        print(f"[FATAL MISMATCH] Word '{name}' is missing from saved_label_map.pkl!")
-        mismatch = True
-    elif saved_label_map[name] != idx:
-        print(f"[FATAL MISMATCH] Word '{name}': Expected index {idx} but got {saved_label_map[name]} in saved_label_map.pkl!")
-        mismatch = True
-
-# Verify frontend translations
-print("Verifying frontend translations.js file...")
-trans_path = os.path.join(BASE_DIR, "frontend", "src", "translations.js")
-if os.path.exists(trans_path):
-    with open(trans_path, "r", encoding="utf-8") as f_trans:
-        trans_content = f_trans.read()
-    
-    # Extract keys from English translations block
-    match_en = re.search(r"en:\s*\{([^}]+)\}", trans_content)
-    if match_en:
-        en_block = match_en.group(1)
-        keys_found = re.findall(r"([a-zA-Z0-9_-]+)\s*:", en_block)
-        keys_found += re.findall(r"['\"]([a-zA-Z0-9_-]+)['\"]\s*:", en_block)
-        keys_set = set(keys_found)
-        
-        missing_keys = [w for w in WLASL_CLASSES if w not in keys_set]
-        if missing_keys:
-            print(f"[FATAL MISMATCH] Frontend translations missing keys for WLASL signs: {missing_keys}")
-            mismatch = True
-        else:
-            print("  Frontend translation keys verification PASSED.")
-    else:
-        print("  [FATAL MISMATCH] Could not parse 'en' translations block from translations.js")
-        mismatch = True
-else:
-    print(f"  [FATAL MISMATCH] translations.js file not found at {trans_path}")
-    mismatch = True
-
-verification_error = None
-if mismatch:
-    verification_error = "Label map mismatch detected! Check server logs."
-    print("\n[WARNING] Label map mismatch detected! Startup is proceeding in diagnostics mode.")
-else:
-    print("Label map verification completed successfully. No mismatches found.")
-print("=" * 60)
-
 # ── Fast LSTM inference via ONNX Runtime ──
 def fast_lstm_infer(x):
     session = get_lstm_session()
     input_name = session.get_inputs()[0].name
     return session.run(None, {input_name: x})[0]
-
-# Warmup: pre-JIT both models so first live request is fast
-print("  Warming up models...")
-_warm_rf = alpha_model.predict_proba(np.zeros((1, 63), dtype=np.float32))
-print("  Warmup complete.")
-print("=" * 60)
-print("  All models loaded and verified successfully.")
-print("=" * 60)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  HELPERS
